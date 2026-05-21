@@ -9,6 +9,14 @@ from qtpy.QtGui import QPainter
 from .. import registration
 
 
+def _slider_no_ticks():
+    # Qt5 exposes this on QSlider; newer bindings may nest it under TickPosition.
+    tick_position = getattr(QSlider, "TickPosition", None)
+    if tick_position is not None and hasattr(tick_position, "NoTicks"):
+        return tick_position.NoTicks
+    return QSlider.NoTicks
+
+
 def make_buttons(parent):
     """ view buttons"""
     # view buttons
@@ -240,31 +248,35 @@ class RangeSlider(QSlider):
     def paintEvent(self, event):
         # based on http://qt.gitorious.org/qt/qt/blobs/master/src/gui/widgets/qslider.cpp
         painter = QPainter(self)
-        style = QApplication.style()
+        try:
+            style = QApplication.style()
+            no_ticks = _slider_no_ticks()
 
-        for i, value in enumerate([self._low, self._high]):
-            opt = QStyleOptionSlider()
-            self.initStyleOption(opt)
+            for i, value in enumerate([self._low, self._high]):
+                opt = QStyleOptionSlider()
+                self.initStyleOption(opt)
 
-            # Only draw the groove for the first slider so it doesn"t get drawn
-            # on top of the existing ones every time
-            if i == 0:
-                opt.subControls = QStyle.SC_SliderHandle  #QStyle.SC_SliderGroove | QStyle.SC_SliderHandle
-            else:
-                opt.subControls = QStyle.SC_SliderHandle
+                # Only draw the groove for the first slider so it doesn"t get drawn
+                # on top of the existing ones every time
+                if i == 0:
+                    opt.subControls = QStyle.SC_SliderHandle  #QStyle.SC_SliderGroove | QStyle.SC_SliderHandle
+                else:
+                    opt.subControls = QStyle.SC_SliderHandle
 
-            if self.tickPosition() != self.NoTicks:
-                opt.subControls |= QStyle.SC_SliderTickmarks
+                if self.tickPosition() != no_ticks:
+                    opt.subControls |= QStyle.SC_SliderTickmarks
 
-            if self.pressed_control:
-                opt.activeSubControls = self.pressed_control
-                opt.state |= QStyle.State_Sunken
-            else:
-                opt.activeSubControls = self.hover_control
+                if self.pressed_control:
+                    opt.activeSubControls = self.pressed_control
+                    opt.state |= QStyle.State_Sunken
+                else:
+                    opt.activeSubControls = self.hover_control
 
-            opt.sliderPosition = value
-            opt.sliderValue = value
-            style.drawComplexControl(QStyle.CC_Slider, opt, painter, self)
+                opt.sliderPosition = value
+                opt.sliderValue = value
+                style.drawComplexControl(QStyle.CC_Slider, opt, painter, self)
+        finally:
+            painter.end()
 
     def mousePressEvent(self, event):
         event.accept()
