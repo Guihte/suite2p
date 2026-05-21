@@ -66,9 +66,16 @@ def make_masks_and_enable_buttons(parent):
     views.init_views(parent)
     # make color arrays for various views
     masks.make_colors(parent)
+    manual_count = sum(bool(stat.get("manual", 0)) for stat in parent.stat)
+    parent.manualRoiCheck.setEnabled(manual_count > 0)
+    parent.manualRoiCheck.setChecked(manual_count > 0)
 
     if parent.iscell.sum() > 0:
-        ich = np.nonzero(parent.iscell)[0][0]
+        icells = np.nonzero(parent.iscell)[0]
+        nonmanual_cells = [
+            i for i in icells if not bool(parent.stat[i].get("manual", 0))
+        ]
+        ich = nonmanual_cells[0] if len(nonmanual_cells) > 0 else icells[0]
     else:
         ich = 0
     parent.ichosen = int(ich)

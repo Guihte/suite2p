@@ -6,7 +6,7 @@ import matplotlib.cm
 import numpy as np
 import pyqtgraph as pg
 from qtpy import QtGui, QtCore
-from qtpy.QtWidgets import QPushButton, QButtonGroup, QLabel, QComboBox, QLineEdit
+from qtpy.QtWidgets import QPushButton, QButtonGroup, QLabel, QComboBox, QLineEdit, QCheckBox
 from matplotlib.colors import hsv_to_rgb
 
 import suite2p.gui.merge
@@ -78,6 +78,13 @@ def make_buttons(parent, b0):
     parent.binedit.returnPressed.connect(
         lambda: parent.mode_change(parent.activityMode))
     parent.l0.addWidget(parent.binedit, nv + b - 2, 1, 1, 1)
+    parent.manualRoiCheck = QCheckBox("manual ROIs")
+    parent.manualRoiCheck.setStyleSheet("color: white;")
+    parent.manualRoiCheck.setChecked(True)
+    parent.manualRoiCheck.setEnabled(False)
+    parent.manualRoiCheck.stateChanged.connect(
+        lambda: parent.update_plot() if parent.loaded else None)
+    parent.l0.addWidget(parent.manualRoiCheck, nv + b + 1, 0, 1, 2)
     b0 = nv + b + 2
     return b0
 
@@ -342,7 +349,23 @@ def draw_masks(parent):  #settings, stat, settings_plot, iscell, ichosen):
             sat = 1
             M[wplot] = make_chosen_circle(M[wplot], ycirc, xcirc, col, sat)
 
+    if getattr(parent, "manualRoiCheck", None) is not None and parent.manualRoiCheck.isChecked():
+        M = draw_manual_roi_overlay(parent, M)
+
     return M[0], M[1]
+
+
+def draw_manual_roi_overlay(parent, M):
+    manual_color = np.array([255, 0, 255], np.uint8)
+    for n, stat in enumerate(parent.stat):
+        if n >= parent.iscell.size or not bool(stat.get("manual", 0)):
+            continue
+        ypix = stat["ypix"].flatten()
+        xpix = stat["xpix"].flatten()
+        i = int(1 - parent.iscell[n])
+        M[i][ypix, xpix, :3] = manual_color
+        M[i][ypix, xpix, 3] = 255
+    return M
 
 
 def make_chosen_ROI(M0, ypix, xpix, v):
