@@ -2,6 +2,8 @@
 Copyright © 2023 Howard Hughes Medical Institute, Authored by Carsen Stringer and Marius Pachitariu.
 """
 import os
+from collections.abc import Mapping
+from io import BytesIO
 from natsort import natsorted
 import numpy as np
 from datetime import datetime
@@ -9,6 +11,50 @@ import scipy
 import pathlib
 import logging 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_for_matlab(value):
+    """Return a copy-like value that scipy.io.savemat can serialize."""
+    if value is None:
+        return np.array([])
+
+    if isinstance(value, pathlib.PurePath):
+        return str(value)
+
+    if isinstance(value, Mapping):
+        return {str(k): _sanitize_for_matlab(v) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_for_matlab(v) for v in value]
+
+    if isinstance(value, np.ndarray) and value.dtype == object:
+        sanitized = np.empty(value.shape, dtype=object)
+        for idx in np.ndindex(value.shape):
+            sanitized[idx] = _sanitize_for_matlab(value[idx])
+        return sanitized
+
+    return value
+
+
+def _find_savemat_failure_key(mdict):
+    for key, value in mdict.items():
+        try:
+            scipy.io.savemat(BytesIO(), {key: value})
+        except Exception:
+            return key
+    return None
+
+
+def _save_fall_mat(file_name, mdict):
+    sanitized_mdict = _sanitize_for_matlab(mdict)
+    try:
+        scipy.io.savemat(file_name=file_name, mdict=sanitized_mdict)
+    except Exception as exc:
+        key = _find_savemat_failure_key(sanitized_mdict)
+        key_msg = f" variable/key '{key}'" if key is not None else ""
+        raise RuntimeError(
+            f"Failed to write Fall.mat at '{file_name}'{key_msg}: {exc}"
+        ) from exc
 
 
 def save_mat(ops, stat, F, Fneu, spks, iscell, redcell,
@@ -74,30 +120,20 @@ def save_mat(ops, stat, F, Fneu, spks, iscell, redcell,
         logger.warning("iscell is None, replacing with empty array")
         iscell = np.array([])
 
-    if F_chan2 is None:
-        scipy.io.savemat(
-            file_name=os.path.join(ops["save_path"], "Fall.mat"), mdict={
-                "stat": stat,
-                "ops": ops_matlab,
-                "F": F,
-                "Fneu": Fneu,
-                "spks": spks,
-                "iscell": iscell,
-                "redcell": redcell
-            })
-    else:
-        scipy.io.savemat(
-            file_name=os.path.join(ops["save_path"], "Fall.mat"), mdict={
-                "stat": stat,
-                "ops": ops_matlab,
-                "F": F,
-                "Fneu": Fneu,
-                "spks": spks,
-                "iscell": iscell,
-                "redcell": redcell,
-                "F_chan2": F_chan2,
-                "Fneu_chan2": Fneu_chan2
-            })
+    mdict = {
+        "stat": stat,
+        "ops": ops_matlab,
+        "F": F,
+        "Fneu": Fneu,
+        "spks": spks,
+        "iscell": iscell,
+        "redcell": redcell
+    }
+    if F_chan2 is not None:
+        mdict["F_chan2"] = F_chan2
+        mdict["Fneu_chan2"] = Fneu_chan2
+
+    _save_fall_mat(os.path.join(ops["save_path"], "Fall.mat"), mdict)
 
 
 def compute_dydx(db1):
