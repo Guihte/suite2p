@@ -173,8 +173,22 @@ def pipeline(save_path, f_reg, f_raw=None, f_reg_chan2=None, f_raw_chan2=None,
 
     if len(stat) == 0:
         logger.info("no ROIs found")
+        n_frames = f_reg.shape[0]
+        F = np.zeros((0, n_frames), dtype=np.float32)
+        Fneu = np.zeros((0, n_frames), dtype=np.float32)
+        spks = np.zeros((0, n_frames), dtype=np.float32)
+        iscell = np.zeros((0, 2), dtype=np.float32)
+        F_chan2 = np.zeros((0, n_frames), dtype=np.float32) if f_reg_chan2 is not None else None
+        Fneu_chan2 = np.zeros((0, n_frames), dtype=np.float32) if f_reg_chan2 is not None else None
+        np.save(os.path.join(save_path, "F.npy"), F)
+        np.save(os.path.join(save_path, "Fneu.npy"), Fneu)
+        np.save(os.path.join(save_path, "spks.npy"), spks)
+        np.save(os.path.join(save_path, "iscell.npy"), iscell)
+        if F_chan2 is not None:
+            np.save(os.path.join(save_path, "F_chan2.npy"), F_chan2)
+            np.save(os.path.join(save_path, "Fneu_chan2.npy"), Fneu_chan2)
         plane_times["total_plane_runtime"] = time.time() - t1
-        return reg_outputs, detect_outputs, stat, None, None, None, None, None, None, None, None, plane_times
+        return reg_outputs, detect_outputs, stat, F, Fneu, F_chan2, Fneu_chan2, spks, iscell, redcell, None, plane_times
 
     logger.info("----------- EXTRACTION")
     t11 = time.time()

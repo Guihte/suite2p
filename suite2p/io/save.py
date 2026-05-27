@@ -189,6 +189,18 @@ def compute_dydx(db1):
     return dy, dx
 
 
+def _load_plane_array_or_empty(fpath, filename, shape, dtype, n_rois):
+    file_path = os.path.join(fpath, filename)
+    if os.path.isfile(file_path):
+        return np.load(file_path)
+    if n_rois == 0:
+        return np.zeros(shape, dtype=dtype)
+    raise FileNotFoundError(
+        f"Required Suite2p file '{filename}' not found for non-empty plane "
+        f"'{fpath}' with {n_rois} ROIs."
+    )
+
+
 def combined(save_folder, save=True):
     """
     Combine all plane folders in save_folder into a single result file.
@@ -275,11 +287,13 @@ def combined(save_folder, save=True):
     Vcorr = np.zeros((LY, LX))
     Nfr = np.amax(np.array([db["nframes"] for db in dbs]))
     ii = 0
+    hasred = False
     for k, db in enumerate(dbs):
         fpath = plane_folders[k]
         if not os.path.exists(os.path.join(fpath, "stat.npy")):
             continue
         stat0 = np.load(os.path.join(fpath, "stat.npy"), allow_pickle=True)
+        n_rois = len(stat0)
         xrange = np.arange(dx[k], dx[k] + Lx[k])
         yrange = np.arange(dy[k], dy[k] + Ly[k])
         meanImg[np.ix_(yrange, xrange)] = db["meanImg"]
@@ -303,16 +317,15 @@ def combined(save_folder, save=True):
             stat0[j]["med"][0] += dy[k]
             stat0[j]["med"][1] += dx[k]
             stat0[j]["iplane"] = k
-        F0 = np.load(os.path.join(fpath, "F.npy"))
-        Fneu0 = np.load(os.path.join(fpath, "Fneu.npy"))
-        spks0 = np.load(os.path.join(fpath, "spks.npy"))
-        iscell0 = np.load(os.path.join(fpath, "iscell.npy"))
+        F0 = _load_plane_array_or_empty(fpath, "F.npy", (0, db["nframes"]), "float32", n_rois)
+        Fneu0 = _load_plane_array_or_empty(fpath, "Fneu.npy", (0, db["nframes"]), "float32", n_rois)
+        spks0 = _load_plane_array_or_empty(fpath, "spks.npy", (0, db["nframes"]), "float32", n_rois)
+        iscell0 = _load_plane_array_or_empty(fpath, "iscell.npy", (0, 2), "float32", n_rois)
         if os.path.isfile(os.path.join(fpath, "redcell.npy")):
             redcell0 = np.load(os.path.join(fpath, "redcell.npy"))
             hasred = True
         else:
-            redcell0 = []
-            hasred = False
+            redcell0 = np.zeros((0, 2), dtype="float32") if n_rois == 0 else []
         nn, nt = F0.shape
         if nt < Nfr:
             fcat = np.zeros((nn, Nfr - nt), "float32")
