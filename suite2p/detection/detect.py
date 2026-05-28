@@ -217,12 +217,18 @@ def detection_wrapper(f_reg, diameter=[12., 12.], tau=1., fs=30, meanImg_chan2=N
                                               threshold_scaling=settings["threshold_scaling"],
                                               **settings["sourcery_settings"])
     logger.info("Detected %d ROIs, %0.2f sec" % (len(stat), time.time() - t0))
-    stat = np.array(stat)
+    stat = np.asarray(stat, dtype=object)
 
     if len(stat) == 0:
-        raise ValueError(
-            "no ROIs were found -- check registered binary and maybe try changing spatial scale / diameter / threshold_scaling"
+        logger.info(
+            "No ROIs were found; returning an empty detection result so the "
+            "pipeline can write zero-row outputs."
         )
+        new_settings["meanImg_crop"] = meanImg
+        new_settings["max_proj"] = max_proj
+        new_settings["diameter"] = diameter
+        redcell = np.zeros((0, 2), dtype=np.float32) if meanImg_chan2 is not None else None
+        return new_settings, stat, redcell
 
     # move ROIs to original coordinates
     ymin, xmin = int(yrange[0]), int(xrange[0])

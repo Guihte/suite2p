@@ -393,19 +393,26 @@ class ROIDraw(QMainWindow):
         np.save(os.path.join(self.parent.basename, "spks.npy"), Spks)
 
         if "reg_file_chan2" in self.parent.ops:
-            F_chan2 = np.load(os.path.join(self.parent.basename, "F_chan2.npy"))
-            Fneu_chan2 = np.load(os.path.join(self.parent.basename, "Fneu_chan2.npy"))
-            redorig = np.load(os.path.join(self.parent.basename, "redcell.npy"))
-            self.F_chan2 = _match_trace_length(self.F_chan2, F_chan2.shape[1])
-            self.Fneu_chan2 = _match_trace_length(self.Fneu_chan2, Fneu_chan2.shape[1])
-            F_chan2 = np.concatenate((self.F_chan2, F_chan2), axis=0)
-            Fneu_chan2 = np.concatenate((self.Fneu_chan2, Fneu_chan2), axis=0)
-            Fneu = np.concatenate((self.Fneu, self.parent.Fneu), axis=0)
-            new_redcell = np.zeros((self.nROIs, 2))
-            new_redcell = np.concatenate((new_redcell, redorig), axis=0)
-            np.save(os.path.join(self.parent.basename, "F_chan2.npy"), F_chan2)
-            np.save(os.path.join(self.parent.basename, "Fneu_chan2.npy"), Fneu_chan2)
-            np.save(os.path.join(self.parent.basename, "redcell.npy"), new_redcell)
+            f_chan2_path = os.path.join(self.parent.basename, "F_chan2.npy")
+            fneu_chan2_path = os.path.join(self.parent.basename, "Fneu_chan2.npy")
+            redcell_path = os.path.join(self.parent.basename, "redcell.npy")
+            # Channel-2 trace outputs are optional, especially in combined folders.
+            if all(os.path.isfile(path) for path in (f_chan2_path, fneu_chan2_path, redcell_path)):
+                F_chan2 = np.load(f_chan2_path)
+                Fneu_chan2 = np.load(fneu_chan2_path)
+                redorig = np.load(redcell_path)
+                self.F_chan2 = _match_trace_length(self.F_chan2, F_chan2.shape[1])
+                self.Fneu_chan2 = _match_trace_length(self.Fneu_chan2, Fneu_chan2.shape[1])
+                F_chan2 = np.concatenate((self.F_chan2, F_chan2), axis=0)
+                Fneu_chan2 = np.concatenate((self.Fneu_chan2, Fneu_chan2), axis=0)
+                Fneu = np.concatenate((self.Fneu, self.parent.Fneu), axis=0)
+                new_redcell = np.zeros((self.nROIs, 2))
+                new_redcell = np.concatenate((new_redcell, redorig), axis=0)
+                np.save(f_chan2_path, F_chan2)
+                np.save(fneu_chan2_path, Fneu_chan2)
+                np.save(redcell_path, new_redcell)
+            else:
+                print("Skipping channel-2 manual ROI trace update; optional channel-2 files are missing.")
 
         print(np.shape(Fcell), np.shape(Fneu), np.shape(Spks), np.shape(new_iscell),
               np.shape(stat_all))
