@@ -201,6 +201,15 @@ def _load_plane_array_or_empty(fpath, filename, shape, dtype, n_rois):
     )
 
 
+def _leading_manual_roi_count(stat):
+    count = 0
+    for stat_entry in stat:
+        if not bool(stat_entry.get("manual", 0)):
+            break
+        count += 1
+    return count
+
+
 def combined(save_folder, save=True):
     """
     Combine all plane folders in save_folder into a single result file.
@@ -288,10 +297,13 @@ def combined(save_folder, save=True):
     Nfr = np.amax(np.array([db["nframes"] for db in dbs]))
     ii = 0
     hasred = False
+    redcell_valid = True
     for k, db in enumerate(dbs):
         fpath = plane_folders[k]
         if not os.path.exists(os.path.join(fpath, "stat.npy")):
             continue
+        plane_name = os.path.basename(fpath)
+        source_plane = int(plane_name[5:]) if plane_name[5:].isdigit() else k
         stat0 = np.load(os.path.join(fpath, "stat.npy"), allow_pickle=True)
         n_rois = len(stat0)
         xrange = np.arange(dx[k], dx[k] + Lx[k])
@@ -317,15 +329,33 @@ def combined(save_folder, save=True):
             stat0[j]["med"][0] += dy[k]
             stat0[j]["med"][1] += dx[k]
             stat0[j]["iplane"] = k
+            stat0[j]["source_plane"] = source_plane
+            stat0[j]["source_plane_roi_index"] = j
         F0 = _load_plane_array_or_empty(fpath, "F.npy", (0, db["nframes"]), "float32", n_rois)
         Fneu0 = _load_plane_array_or_empty(fpath, "Fneu.npy", (0, db["nframes"]), "float32", n_rois)
         spks0 = _load_plane_array_or_empty(fpath, "spks.npy", (0, db["nframes"]), "float32", n_rois)
         iscell0 = _load_plane_array_or_empty(fpath, "iscell.npy", (0, 2), "float32", n_rois)
         if os.path.isfile(os.path.join(fpath, "redcell.npy")):
             redcell0 = np.load(os.path.join(fpath, "redcell.npy"))
-            hasred = True
+            if redcell0.ndim == 2 and redcell0.shape == (n_rois, 2):
+                hasred = True
+            elif redcell0.ndim == 2 and redcell0.shape[1] == 2:
+                n_manual = _leading_manual_roi_count(stat0)
+                if n_manual > 0 and redcell0.shape[0] + n_manual == n_rois:
+                    redcell0 = np.concatenate(
+                        (np.zeros((n_manual, 2), dtype=redcell0.dtype), redcell0),
+                        axis=0,
+                    )
+                    hasred = True
+                else:
+                    redcell_valid = False
+                    redcell0 = np.zeros((n_rois, 2), dtype="float32")
+            else:
+                redcell_valid = False
+                redcell0 = np.zeros((n_rois, 2), dtype="float32")
         else:
-            redcell0 = np.zeros((0, 2), dtype="float32") if n_rois == 0 else []
+            redcell_valid = redcell_valid and n_rois == 0
+            redcell0 = np.zeros((n_rois, 2), dtype="float32")
         nn, nt = F0.shape
         if nt < Nfr:
             fcat = np.zeros((nn, Nfr - nt), "float32")
@@ -342,8 +372,7 @@ def combined(save_folder, save=True):
             spks = np.concatenate((spks, spks0))
             stat = np.concatenate((stat, stat0))
             iscell = np.concatenate((iscell, iscell0))
-            if hasred:
-                redcell = np.concatenate((redcell, redcell0))
+            redcell = np.concatenate((redcell, redcell0))
         ii += 1
         logger.info("appended plane %d to combined view" % k)
     
@@ -370,9 +399,13 @@ def combined(save_folder, save=True):
 
     # need to save iscell regardless (required for GUI function)
     np.save(os.path.join(fpath, "iscell.npy"), iscell)
+    hasred = hasred and redcell_valid
     if hasred:
         np.save(os.path.join(fpath, "redcell.npy"), redcell)
     else:
+        redcell_path = os.path.join(fpath, "redcell.npy")
+        if os.path.exists(redcell_path):
+            os.remove(redcell_path)
         redcell = np.zeros_like(iscell)
 
     if save:

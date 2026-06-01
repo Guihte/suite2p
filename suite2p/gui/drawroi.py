@@ -177,10 +177,15 @@ def masks_and_traces(settings, stat_manual, stat_orig):
 
     # subtract neuropil and compute skew, std from F
     dF = F - settings["neucoeff"] * Fneu
+    dF_var = dF.var(axis=1)
+    snr = np.full(F.shape[0], np.nan, dtype=np.float32)
+    valid = dF_var > 0
+    snr[valid] = 1 - 0.5 * np.diff(dF[valid], axis=1).var(axis=1) / dF_var[valid]
     sk = stats.skew(dF, axis=1)
     sd = np.std(dF, axis=1)
 
     for n in range(F.shape[0]):
+        manual_roi_stats[n]["snr"] = snr[n]
         manual_roi_stats[n]["skew"] = sk[n]
         manual_roi_stats[n]["std"] = sd[n]
         manual_roi_stats[n]["med"] = [
@@ -369,7 +374,6 @@ class ROIDraw(QMainWindow):
         stat_all = manual_stat + list(np.asarray(self.parent.stat, dtype=object))
         stat_all = np.asarray(stat_all, dtype=object)
         np.save(os.path.join(self.parent.basename, "stat.npy"), stat_all)
-        np.save(os.path.join(self.parent.basename, "stat_manual.npy"), stat_all)
         iscell_prob = np.concatenate(
             (self.parent.iscell[:, np.newaxis], self.parent.probcell[:, np.newaxis]),
             axis=1)

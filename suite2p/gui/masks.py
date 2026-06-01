@@ -13,6 +13,10 @@ import suite2p.gui.merge
 from . import io
 
 
+def _get_optional_stat_scalar(stat_entry, key, default=np.nan):
+    return stat_entry.get(key, default)
+
+
 def make_buttons(parent, b0):
     """ color buttons at row b0 """
     # color buttons
@@ -133,15 +137,23 @@ def make_colors(parent):
         if b > 0:
             istat = np.zeros((ncells, 1))
             if b < len(parent.color_names) - 2:
-                if names in parent.stat[0]:
+                if any(names in parent.stat[n] for n in range(ncells)):
                     for n in range(0, ncells):
-                        istat[n] = parent.stat[n][names]
-                istat1 = np.percentile(istat, 2)
-                istat99 = np.percentile(istat, 98)
+                        istat[n] = _get_optional_stat_scalar(parent.stat[n], names)
+                if np.all(np.isnan(istat)):
+                    istat1, istat99 = 0, 1
+                    istat = np.zeros_like(istat)
+                else:
+                    istat1 = np.nanpercentile(istat, 2)
+                    istat99 = np.nanpercentile(istat, 98)
                 parent.colors["colorbar"].append(
                     [istat1, (istat99 - istat1) / 2 + istat1, istat99])
                 istat = istat - istat1
-                istat = istat / (istat99 - istat1)
+                if istat99 > istat1:
+                    istat = istat / (istat99 - istat1)
+                else:
+                    istat = np.zeros_like(istat)
+                istat = np.nan_to_num(istat, nan=0.0)
                 istat = np.maximum(0, np.minimum(1, istat))
             else:
                 istat = np.expand_dims(parent.probcell, axis=1)

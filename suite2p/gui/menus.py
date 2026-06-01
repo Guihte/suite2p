@@ -2,7 +2,7 @@
 Copyright © 2023 Howard Hughes Medical Institute, Authored by Carsen Stringer and Marius Pachitariu.
 """
 from qtpy import QtGui
-from qtpy.QtWidgets import QAction, QMenu
+from qtpy.QtWidgets import QAction, QMenu, QMessageBox
 from pkg_resources import iter_entry_points
 
 from . import reggui, drawroi, merge, io, rungui, visualize, classgui
@@ -35,6 +35,15 @@ def mainmenu(parent):
     loadFolder.setShortcut("Ctrl+F")
     loadFolder.triggered.connect(lambda: io.load_dialog_folder(parent))
     parent.addAction(loadFolder)
+
+    regenerateCombined = QAction("Regenerate combined folder", parent)
+    regenerateCombined.triggered.connect(lambda: io.regenerate_combined_folder(parent))
+    parent.addAction(regenerateCombined)
+
+    propagateCombinedLabels = QAction("Propagate combined labels to plane folders", parent)
+    propagateCombinedLabels.triggered.connect(
+        lambda: propagate_combined_labels(parent))
+    parent.addAction(propagateCombinedLabels)
 
     # load a behavioral trace
     parent.loadBeh = QAction("Load behavior or stim trace (1D only)", parent)
@@ -74,6 +83,8 @@ def mainmenu(parent):
     file_menu.addAction(loadProc)
     file_menu.addAction(loadNWB)
     file_menu.addAction(loadFolder)
+    file_menu.addAction(regenerateCombined)
+    file_menu.addAction(propagateCombinedLabels)
     file_menu.addAction(parent.loadBeh)
     file_menu.addAction(parent.saveNWB)
     file_menu.addAction(parent.saveMat)
@@ -185,8 +196,29 @@ def run_suite2p(parent):
 
 
 def manual_label(parent):
+    if io.is_combined_folder(getattr(parent, "basename", "")):
+        QMessageBox.warning(parent, "Manual labelling", io.MANUAL_ROI_COMBINED_WARNING)
+        return
     MW = drawroi.ROIDraw(parent)
     MW.show()
+
+
+def propagate_combined_labels(parent):
+    if not io.is_combined_folder(getattr(parent, "basename", "")):
+        io.propagate_combined_labels_to_planes(parent)
+        return
+    propagate_redcell = QMessageBox.question(
+        parent,
+        "Propagate redcell labels",
+        "Also propagate redcell labels if available?",
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.No,
+    ) == QMessageBox.Yes
+    io.propagate_combined_labels_to_planes(
+        parent,
+        propagate_redcell=propagate_redcell,
+        redcell_missing_policy="zeros_if_two_channel",
+    )
 
 
 def vis_window(parent):
