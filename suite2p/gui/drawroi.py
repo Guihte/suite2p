@@ -127,6 +127,17 @@ def _match_trace_length(traces, n_frames):
     return np.concatenate((traces, pad), axis=1)
 
 
+def _optional_traces_or_zeros(traces, n_rois, n_frames, dtype=np.float32):
+    if traces is None:
+        return np.zeros((n_rois, n_frames), dtype=dtype)
+
+    traces = np.asarray(traces)
+    if traces.size == 0:
+        return np.zeros((n_rois, n_frames), dtype=dtype)
+
+    return _match_trace_length(traces, n_frames)
+
+
 def masks_and_traces(settings, stat_manual, stat_orig):
     """ main extraction function
         inputs: settings and stat
@@ -405,8 +416,10 @@ class ROIDraw(QMainWindow):
                 F_chan2 = np.load(f_chan2_path)
                 Fneu_chan2 = np.load(fneu_chan2_path)
                 redorig = np.load(redcell_path)
-                self.F_chan2 = _match_trace_length(self.F_chan2, F_chan2.shape[1])
-                self.Fneu_chan2 = _match_trace_length(self.Fneu_chan2, Fneu_chan2.shape[1])
+                self.F_chan2 = _optional_traces_or_zeros(
+                    self.F_chan2, self.nROIs, F_chan2.shape[1], F_chan2.dtype)
+                self.Fneu_chan2 = _optional_traces_or_zeros(
+                    self.Fneu_chan2, self.nROIs, Fneu_chan2.shape[1], Fneu_chan2.dtype)
                 F_chan2 = np.concatenate((self.F_chan2, F_chan2), axis=0)
                 Fneu_chan2 = np.concatenate((self.Fneu_chan2, Fneu_chan2), axis=0)
                 Fneu = np.concatenate((self.Fneu, self.parent.Fneu), axis=0)
