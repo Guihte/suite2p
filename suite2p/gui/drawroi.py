@@ -8,18 +8,20 @@ import math
 import numpy as np
 import pyqtgraph as pg
 from qtpy import QtGui, QtCore
-from qtpy.QtWidgets import QPushButton, QLabel, QLineEdit, QMainWindow, QGridLayout, QButtonGroup, QMessageBox, QWidget
+from qtpy.QtWidgets import QPushButton, QLabel, QLineEdit, QMainWindow, QGridLayout, QButtonGroup, QMessageBox, QWidget, QVBoxLayout
 from matplotlib.colors import hsv_to_rgb
 from scipy import stats
 from scipy.ndimage import rotate
 
 from . import io
-from ..parameters import default_settings
-from ..io import BinaryFile
-from ..extraction import masks, extraction_wrapper
+from ..extraction import masks
 from ..detection.stats import roi_stats
 from ..extraction import preprocess
 from ..extraction.dcnv import oasis
+from ..extraction.extract import extract_traces
+from ..io.binary import BinaryFile
+from ..parameters import default_settings
+from ..run_s2p import _assign_torch_device
 
 
 def _view_ranges_from_parent(parent):
@@ -59,9 +61,18 @@ def _image_in_view(image, Ly, Lx, yrange, xrange):
 
 
 def has_valid_anatomical_mean(ops):
-    return ("meanImg" in ops and "meanImg_chan2" in ops and
-            ops["meanImg_chan2"] is not None and
-            np.asarray(ops["meanImg_chan2"]).shape == np.asarray(ops["meanImg"]).shape)
+    if "meanImg" not in ops or "meanImg_chan2" not in ops or ops["meanImg_chan2"] is None:
+        return False
+    mean_img = np.asarray(ops["meanImg"])
+    chan2_img = np.asarray(ops["meanImg_chan2"])
+    if mean_img.ndim != 2 or chan2_img.ndim != 2:
+        return False
+    if chan2_img.shape == mean_img.shape:
+        return True
+    yrange = ops.get("yrange", [0, mean_img.shape[0]])
+    xrange = ops.get("xrange", [0, mean_img.shape[1]])
+    return chan2_img.shape == (int(yrange[1]) - int(yrange[0]),
+                               int(xrange[1]) - int(xrange[0]))
 
 
 def _manual_roi_diameter(settings):
@@ -80,6 +91,8 @@ def _manual_roi_settings(settings):
     extraction = {**defaults["extraction"], **settings.get("extraction", {})}
     dcnv = {**defaults["dcnv_preprocess"], **settings.get("dcnv_preprocess", {})}
     out = dict(settings)
+    out["extraction"] = extraction
+    out["dcnv_preprocess"] = dcnv
 
     for key in ("tau", "fs", "diameter"):
         out.setdefault(key, defaults[key])
@@ -96,25 +109,6 @@ def _manual_roi_settings(settings):
 def _manual_roi_stats(stats, settings):
     return roi_stats(np.asarray(stats), settings["Ly"], settings["Lx"],
                      diameter=_manual_roi_diameter(settings))
-
-
-def extract_traces_from_masks(settings, cell_masks, neuropil_masks):
-    extraction_settings = {"batch_size": settings["batch_size"]}
-    f_reg_chan2 = None
-    with BinaryFile(Ly=settings["Ly"], Lx=settings["Lx"],
-                    filename=settings["reg_file"], write=False) as f_reg:
-        if "reg_file_chan2" in settings and os.path.isfile(settings["reg_file_chan2"]):
-            with BinaryFile(Ly=settings["Ly"], Lx=settings["Lx"],
-                            filename=settings["reg_file_chan2"], write=False) as f_reg_chan2:
-                return extraction_wrapper(np.asarray([]), f_reg,
-                                          f_reg_chan2=f_reg_chan2,
-                                          cell_masks=cell_masks,
-                                          neuropil_masks=neuropil_masks,
-                                          settings=extraction_settings)
-        return extraction_wrapper(np.asarray([]), f_reg, f_reg_chan2=f_reg_chan2,
-                                  cell_masks=cell_masks,
-                                  neuropil_masks=neuropil_masks,
-                                  settings=extraction_settings)
 
 
 def _match_trace_length(traces, n_frames):
@@ -145,6 +139,8 @@ def masks_and_traces(settings, stat_manual, stat_orig):
         returns: F (ROIs x time), Fneu (ROIs x time), F_chan2, Fneu_chan2, settings, stat
         F_chan2 and Fneu_chan2 will be empty if no second channel
     """
+    # Merge with defaults to ensure all required keys are present
+    settings = {**default_settings(), **settings}
 
     t0 = time.time()
     settings = _manual_roi_settings(settings)
@@ -157,7 +153,7 @@ def masks_and_traces(settings, stat_manual, stat_orig):
     stat_all = _manual_roi_stats(stat_all, settings)
     cell_masks = [
         masks.create_cell_mask(stat, Ly=settings["Ly"], Lx=settings["Lx"],
-                               allow_overlap=settings["allow_overlap"]) for stat in stat_all
+                               allow_overlap=settings["extraction"]["allow_overlap"]) for stat in stat_all
     ]
     cell_pix = masks.create_cell_pix(stat_all, Ly=settings["Ly"], Lx=settings["Lx"])
     manual_roi_stats = stat_all[:len(stat_manual)]
@@ -166,13 +162,26 @@ def masks_and_traces(settings, stat_manual, stat_orig):
         ypixs=[stat["ypix"] for stat in manual_roi_stats],
         xpixs=[stat["xpix"] for stat in manual_roi_stats],
         cell_pix=cell_pix,
-        inner_neuropil_radius=settings["inner_neuropil_radius"],
-        min_neuropil_pixels=settings["min_neuropil_pixels"],
+        inner_neuropil_radius=settings["extraction"]["inner_neuropil_radius"],
+        min_neuropil_pixels=settings["extraction"]["min_neuropil_pixels"],
     )
     print("Masks made in %0.2f sec." % (time.time() - t0))
 
-    F, Fneu, F_chan2, Fneu_chan2 = extract_traces_from_masks(settings, manual_cell_masks,
-                                                             manual_neuropil_masks)
+    # Extract traces from binary file
+    Ly, Lx = settings["Ly"], settings["Lx"]
+    batch_size = settings["extraction"]["batch_size"]
+    device = _assign_torch_device(settings["torch_device"])
+    f_reg = BinaryFile(Ly, Lx, settings["reg_file"])
+    F, Fneu = extract_traces(f_reg, manual_cell_masks, manual_neuropil_masks, batch_size=batch_size, device=device)
+    f_reg.close()
+
+    # Handle chan2 if present
+    if "reg_file_chan2" in settings and settings["reg_file_chan2"]:
+        f_reg_chan2 = BinaryFile(Ly, Lx, settings["reg_file_chan2"])
+        F_chan2, Fneu_chan2 = extract_traces(f_reg_chan2, manual_cell_masks, manual_neuropil_masks, batch_size=batch_size, device=device)
+        f_reg_chan2.close()
+    else:
+        F_chan2, Fneu_chan2 = None, None
 
     # compute activity statistics for classifier
     npix = np.array([stat_orig[n]["npix"] for n in range(len(stat_orig))
@@ -187,7 +196,7 @@ def masks_and_traces(settings, stat_manual, stat_orig):
             manual_roi_stats[n]["iplane"] = stat_orig[0]["iplane"]
 
     # subtract neuropil and compute skew, std from F
-    dF = F - settings["neucoeff"] * Fneu
+    dF = F - settings["extraction"]["neuropil_coefficient"] * Fneu
     dF_var = dF.var(axis=1)
     snr = np.full(F.shape[0], np.nan, dtype=np.float32)
     valid = dF_var > 0
@@ -204,10 +213,10 @@ def masks_and_traces(settings, stat_manual, stat_orig):
             np.mean(manual_roi_stats[n]["xpix"])
         ]
 
-    dF = preprocess(F=dF, baseline=settings["baseline"], win_baseline=settings["win_baseline"],
-                    sig_baseline=settings["sig_baseline"], fs=settings["fs"],
-                    prctile_baseline=settings["prctile_baseline"])
-    spks = oasis(F=dF, batch_size=settings["batch_size"], tau=settings["tau"], fs=settings["fs"])
+    dF = preprocess(F=dF, baseline=settings["dcnv_preprocess"]["baseline"], win_baseline=settings["dcnv_preprocess"]["win_baseline"],
+                    sig_baseline=settings["dcnv_preprocess"]["sig_baseline"], fs=settings["fs"],
+                    prctile_baseline=settings["dcnv_preprocess"]["prctile_baseline"], device=device)
+    spks = oasis(F=dF, batch_size=settings["extraction"]["batch_size"], tau=settings["tau"], fs=settings["fs"])
 
     return F, Fneu, F_chan2, Fneu_chan2, spks, settings, manual_roi_stats
 
@@ -224,8 +233,10 @@ class ViewButton(QPushButton):
         self.show()
 
     def press(self, parent, bid):
+        for b in range(len(parent.views)):
+            parent.viewbtns.button(b).setStyleSheet(parent.styleUnpressed)
+        parent.viewbtns.button(bid).setStyleSheet(parent.stylePressed)
         parent.img0.setImage(parent.masked_images[:, :, :, bid])
-
         parent.win.show()
         parent.show()
 
@@ -244,7 +255,7 @@ class ROIDraw(QMainWindow):
         # layout = QtGui.QFormLayout()
         self.cwidget.setLayout(self.l0)
         self.stylePressed = ("QPushButton {Text-align: left; "
-                             "background-color: rgb(100,50,100); "
+                             "background-color: rgb(100,100,100); "
                              "color:white;}")
         self.styleUnpressed = ("QPushButton {Text-align: left; "
                                "background-color: rgb(50,50,50); "
@@ -311,7 +322,7 @@ class ROIDraw(QMainWindow):
         self.saveGUI = False
         self.closeGUI = QPushButton("Save and Quit")
         self.closeGUI.setFont(QtGui.QFont("Arial", 8, QtGui.QFont.Bold))
-        self.closeGUI.clicked.connect(self.close_GUI)
+        self.closeGUI.clicked.connect(lambda: self.close_GUI())
         self.closeGUI.setEnabled(False)
         self.closeGUI.setFixedWidth(100)
         self.closeGUI.setStyleSheet(self.styleUnpressed)
@@ -322,25 +333,30 @@ class ROIDraw(QMainWindow):
             "W: mean img", "E: mean img (enhanced)", "R: correlation map",
             "T: max projection"
         ]
-        self.anatomical_view_index = None
+        self.channel2_view_index = None
         self.has_anatomical_mean = has_valid_anatomical_mean(self.parent.ops)
         if self.has_anatomical_mean:
-            self.anatomical_view_index = len(self.views)
-            self.views.append("A: anatomical img")
+            self.channel2_view_index = len(self.views)
+            self.views.append("Y: mean img chan2")
         b = 0
         self.viewbtns = QButtonGroup(self)
+        view_container = QWidget()
+        view_vbox = QVBoxLayout()
+        view_vbox.setContentsMargins(0, 0, 0, 0)
+        view_vbox.setSpacing(4)
+        view_container.setLayout(view_vbox)
         for names in self.views:
             btn = ViewButton(b, "&" + names, self)
             self.viewbtns.addButton(btn, b)
-            if b == self.anatomical_view_index:
-                self.l0.addWidget(btn, 1, 5, 1, 1)
-            else:
-                self.l0.addWidget(btn, b, 4, 1, 1)
+            view_vbox.addWidget(btn)
             btn.setEnabled(True)
             b += 1
-        b = 0
-        self.viewbtns.button(b).setChecked(True)
-        self.viewbtns.button(b).setStyleSheet(self.stylePressed)
+        view_vbox.addStretch()
+        self.l0.addWidget(view_container, 0, 4, 3, 1)
+        for b in range(len(self.views)):
+            self.viewbtns.button(b).setStyleSheet(self.styleUnpressed)
+        self.viewbtns.button(0).setChecked(True)
+        self.viewbtns.button(0).setStyleSheet(self.stylePressed)
 
         self.l0.addWidget(QLabel("neuropil"), 13, 13, 1, 1)
 
@@ -442,36 +458,33 @@ class ROIDraw(QMainWindow):
 
     def normalize_img_add_masks(self):
         yrange, xrange = _view_ranges_from_parent(self.parent)
-        masked_image = np.zeros(
-            ((self.Ly, self.Lx, 3, len(self.views))))  # 3 for RGB
-        for i in np.arange(len(self.views)):
+        nviews = len(self.views)
+        masked_image = np.zeros((self.Ly, self.Lx, 3, nviews))
+        for i in np.arange(nviews):
             if i == 0:
-                mimg = _image_in_view(self.parent.ops["meanImg"], self.Ly, self.Lx,
-                                      yrange, xrange)
-
+                src = self.parent.ops["meanImg"]
             elif i == 1:
-                mimg = _image_in_view(self.parent.ops["meanImgE"], self.Ly, self.Lx,
-                                      yrange, xrange)
+                src = self.parent.ops["meanImgE"]
             elif i == 2:
-                mimg = _image_in_view(self.parent.ops["Vcorr"], self.Ly, self.Lx,
-                                      yrange, xrange)
-
-            elif i == self.anatomical_view_index:
-                # Local convention: meanImg_chan2 is the registered red/anatomical
-                # stream when functional_chan=2 and Bruker ch1 is anatomical.
-                mimg = _image_in_view(self.parent.ops["meanImg_chan2"], self.Ly,
-                                      self.Lx, yrange, xrange)
-
+                src = self.parent.ops["Vcorr"]
+            elif i == 3:
+                src = self.parent.ops.get("max_proj", None)
+            elif i == self.channel2_view_index:
+                src = self.parent.ops["meanImg_chan2"]
             else:
-                mimg = np.zeros((self.Ly, self.Lx), np.float32)
-                if "max_proj" in self.parent.ops:
-                    mimg = _image_in_view(self.parent.ops["max_proj"], self.Ly,
-                                          self.Lx, yrange, xrange)
+                src = None
 
-            mimg1 = np.percentile(mimg, 1)
-            mimg99 = np.percentile(mimg, 99)
-            mimg = (mimg - mimg1) / (mimg99 - mimg1)
-            mimg = np.maximum(0, np.minimum(1, mimg))
+            mimg = np.zeros((self.Ly, self.Lx), np.float32)
+            if src is not None:
+                mimg = _image_in_view(src, self.Ly, self.Lx, yrange, xrange)
+                mimg1 = np.percentile(src, 1)
+                mimg99 = np.percentile(src, 99)
+                if mimg99 > mimg1:
+                    mimg = (mimg - mimg1) / (mimg99 - mimg1)
+                else:
+                    mimg = np.zeros_like(mimg)
+                mimg = np.clip(mimg, 0, 1).astype(np.float32)
+
             masked_image[:, :, :, i] = self.create_masks_of_cells(mimg)
 
         return masked_image
@@ -519,11 +532,11 @@ class ROIDraw(QMainWindow):
             elif event.key() == QtCore.Qt.Key_T:
                 self.viewbtns.button(3).setChecked(True)
                 self.viewbtns.button(3).press(self, 3)
-            elif (event.key() == QtCore.Qt.Key_A and
-                  self.anatomical_view_index is not None):
-                self.viewbtns.button(self.anatomical_view_index).setChecked(True)
-                self.viewbtns.button(self.anatomical_view_index).press(
-                    self, self.anatomical_view_index)
+            elif (event.key() in (QtCore.Qt.Key_Y, QtCore.Qt.Key_A) and
+                  self.channel2_view_index is not None):
+                self.viewbtns.button(self.channel2_view_index).setChecked(True)
+                self.viewbtns.button(self.channel2_view_index).press(
+                    self, self.channel2_view_index)
 
     def add_ROI(self, pos=None):
         self.iROI = len(self.ROIs)
@@ -694,13 +707,13 @@ class sROI():
         parent.win.show()
         parent.show()
 
-    def rotate_ROI(self, parent, ellipse, xrange, yrange, posx, posy):
+    def rotate_ROI(self, parent, ellipse, xrange, yrange, center_x, center_y):
         #Rotates ROI depending on Rotatehandle degree
         ellipse = rotate(ellipse, angle=math.floor(self.ROI.angle()), order=0)
         ellipse = np.flip(ellipse, axis=0)
-        xrange = (np.arange(-1 * int(ellipse.shape[1] - 1), 1) + int(posx)).astype(np.int32)
-        yrange = (np.arange(-1 * int(ellipse.shape[0] - 1), 1) + int(posy)).astype(np.int32)
-        yrange += int(np.floor(ellipse.shape[0] / 2)) + 1
+        w, h = ellipse.shape[1], ellipse.shape[0]
+        xrange = (np.arange(-(w // 2), w - w // 2) + int(center_x)).astype(np.int32)
+        yrange = (np.arange(-(h // 2), h - h // 2) + int(center_y)).astype(np.int32)
         return ellipse, xrange, yrange
 
     def position(self, parent):
@@ -716,13 +729,16 @@ class sROI():
         yrange = (np.arange(-1 * int(sizey), 1) + int(posy)).astype(np.int32)
         yrange += int(np.floor(sizey / 2)) + 1
         # what is ellipse circling?
-        br = self.ROI.boundingRect()
         ellipse = np.zeros((yrange.size, xrange.size), "bool")
         x, y = np.meshgrid(np.arange(0, xrange.size, 1), np.arange(0, yrange.size, 1))
         ellipse = ((y - br.center().y())**2 / (br.height() / 2)**2 +
                    (x - br.center().x())**2 / (br.width() / 2)**2) <= 1
+        center_scene = self.ROI.mapToScene(br.center())
+        center_view = parent.p0.mapSceneToView(center_scene)
+        center_x = center_view.x()
+        center_y = center_view.y()
         if self.ROI.angle() not in (0, 180, -180):
-            ellipse, xrange, yrange = self.rotate_ROI(parent, ellipse, xrange, yrange, posx, posy)
+            ellipse, xrange, yrange = self.rotate_ROI(parent, ellipse, xrange, yrange, center_x, center_y)
         #ensures that ROI is not placed outside of movie coordinates
         ellipse = ellipse[:, np.logical_and(xrange >= 0, xrange < parent.Lx)]
         xrange = xrange[np.logical_and(xrange >= 0, xrange < parent.Lx)]

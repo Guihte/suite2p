@@ -275,6 +275,10 @@ def compute_filters_and_norm(refImg, norm_frames=True, spatial_smooth=1.15, spat
         maskMul, maskOffset, cfRefImg = rigid.compute_masks_ref_smooth_fft(refImg=rimg, maskSlope=spatial_taper,
                                                                  smooth_sigma=spatial_smooth)
         Ly, Lx = refImg.shape
+        # MPS backend does not support float64, convert to float32
+        if device.type == "mps":
+            maskMul, maskOffset = maskMul.to(torch.float32), maskOffset.to(torch.float32)
+            cfRefImg = cfRefImg.to(torch.complex64)
         maskMul, maskOffset = maskMul.to(device), maskOffset.to(device)
         cfRefImg = cfRefImg.to(device)
         blocks = []
@@ -282,9 +286,13 @@ def compute_filters_and_norm(refImg, norm_frames=True, spatial_smooth=1.15, spat
             blocks = nonrigid.make_blocks(Ly=Ly, Lx=Lx, block_size=block_size,
                                           lpad=lpad, subpixel=subpixel)
             maskMulNR, maskOffsetNR, cfRefImgNR = nonrigid.compute_masks_ref_smooth_fft(
-                refImg0=rimg, maskSlope=spatial_taper, smooth_sigma=spatial_smooth, 
+                refImg0=rimg, maskSlope=spatial_taper, smooth_sigma=spatial_smooth,
                 yblock=blocks[0], xblock=blocks[1],
             )
+            # MPS backend does not support float64, convert to float32
+            if device.type == "mps":
+                maskMulNR, maskOffsetNR = maskMulNR.to(torch.float32), maskOffsetNR.to(torch.float32)
+                cfRefImgNR = cfRefImgNR.to(torch.complex64)
             maskMulNR, maskOffsetNR = maskMulNR.to(device), maskOffsetNR.to(device)
             cfRefImgNR = cfRefImgNR.to(device)
 
@@ -440,6 +448,10 @@ def shift_frames(fr_torch, yoff, xoff, yoff1=None, xoff1=None, blocks=None,
             if fr_torch.device.type == "cuda":
                 yoff1 = torch.from_numpy(yoff1).pin_memory().to(device)
                 xoff1 = torch.from_numpy(xoff1).pin_memory().to(device)
+            elif device.type == "mps":
+                # MPS backend does not support float64
+                yoff1 = torch.from_numpy(yoff1).to(torch.float32).to(device)
+                xoff1 = torch.from_numpy(xoff1).to(torch.float32).to(device)
             else:
                 yoff1 = torch.from_numpy(yoff1).to(device)
                 xoff1 = torch.from_numpy(xoff1).to(device)
@@ -475,11 +487,11 @@ def normalize_reference_image(refImg):
     return refImg, rmin, rmax
 
 
-def register_frames(f_align_in, refImg, f_align_out=None, batch_size=100, 
-                    bidiphase=0, norm_frames=True, smooth_sigma=1.15, spatial_taper=3.45, 
-                    block_size=(128,128), nonrigid=True, maxregshift=0.1, 
+def register_frames(f_align_in, refImg, f_align_out=None, batch_size=100,
+                    bidiphase=0, norm_frames=True, smooth_sigma=1.15, spatial_taper=3.45,
+                    block_size=(128,128), nonrigid=True, maxregshift=0.1,
                     smooth_sigma_time=0, snr_thresh=1.2, maxregshiftNR=5,
-                    device=torch.device("cuda"), tif_root=None, apply_shifts=True,
+                    subpixel=10, device=torch.device("cuda"), tif_root=None, apply_shifts=True,
                     upsample_meanImg=False):
     """
     Register frames to a reference image using rigid and optionally nonrigid shifts.
@@ -566,11 +578,11 @@ def register_frames(f_align_in, refImg, f_align_out=None, batch_size=100,
     else:
         nZ = 1
 
-    refAndMasks = compute_filters_and_norm(refImg, norm_frames=norm_frames, 
+    refAndMasks = compute_filters_and_norm(refImg, norm_frames=norm_frames,
                                            spatial_smooth=smooth_sigma,
-                                           spatial_taper=spatial_taper, 
-                                           block_size=block_size if nonrigid else None, 
-                                           device=device)
+                                           spatial_taper=spatial_taper,
+                                           block_size=block_size if nonrigid else None,
+                                           subpixel=subpixel, device=device)
     blocks = refAndMasks[-3] if nZ==1 else refAndMasks[0][-3]
     rmin = refAndMasks[-2] if nZ==1 else [refAndMasks[z][-2] for z in range(nZ)]
     rmax = refAndMasks[-1] if nZ==1 else [refAndMasks[z][-1] for z in range(nZ)]
@@ -580,7 +592,9 @@ def register_frames(f_align_in, refImg, f_align_out=None, batch_size=100,
     if upsample_meanImg:
         if not isinstance(upsample_meanImg, (np.ndarray, list, tuple)):
             upsample_meanImg = [upsample_meanImg, upsample_meanImg]
-        mean_img_ups = torch.zeros((int(Ly*upsample_meanImg[0]), int(Lx*upsample_meanImg[1])), dtype=torch.double, device=device)
+        # MPS backend does not support float64
+        ups_dtype = torch.float32 if device.type == "mps" else torch.double
+        mean_img_ups = torch.zeros((int(Ly*upsample_meanImg[0]), int(Lx*upsample_meanImg[1])), dtype=ups_dtype, device=device)
         counts_ups = torch.zeros((int(Ly*upsample_meanImg[0]), int(Lx*upsample_meanImg[1])), dtype=torch.int, device=device)
     else:
         mean_img_ups, counts_ups, meanImg_ups = None, None, None
@@ -815,8 +829,8 @@ def assign_reg_io(f_reg, f_raw=None, f_reg_chan2=None,
         if f_align_in.shape[0] != f_alt_in.shape[0]:
             raise ValueError("number of frames in f_align_in and f_alt_in must match")
         
+    tif_root_align, tif_root_alt = None, None
     if save_path:
-        tif_root_align, tif_root_alt = None, None
         if reg_tif:
             tifroot = os.path.join(save_path, "reg_tif")
             os.makedirs(tifroot, exist_ok=True)
@@ -890,7 +904,10 @@ def registration_wrapper(f_reg, f_raw=None, f_reg_chan2=None, f_raw_chan2=None,
 
     nchannels = 2 if f_alt_in is not None else 1
     logger.info(f"registering {nchannels} channels")
-    
+    if device.type == "mps":
+        logger.warning("MPS device does not support float64, using float32 for registration. "
+                       "If you encounter registration issues, try using cuda or cpu instead.")
+
     ### ----- compute reference image and bidiphase shift -------------- ###
     n_frames, Ly, Lx = f_align_in.shape
     badframes0 = np.zeros(n_frames, "bool") if badframes is None else badframes.copy()
@@ -937,8 +954,9 @@ def registration_wrapper(f_reg, f_raw=None, f_reg_chan2=None, f_raw_chan2=None,
                                 spatial_taper=settings["spatial_taper"], block_size=settings["block_size"],
                                 nonrigid=settings["nonrigid"],
                                 maxregshift=settings["maxregshift"], smooth_sigma_time=settings["smooth_sigma_time"],
-                                    snr_thresh=settings["snr_thresh"], maxregshiftNR=settings["maxregshiftNR"],
-                                    device=device, upsample_meanImg=settings.get("upsample_meanImg", False))
+                                snr_thresh=settings["snr_thresh"], maxregshiftNR=settings["maxregshiftNR"],
+                                subpixel=settings["subpixel"],
+                                device=device, upsample_meanImg=settings.get("upsample_meanImg", False))
         rmin, rmax, mean_img, offsets_all, blocks, mean_img_ups, counts_ups, meanImg_ups = outputs
         yoff, xoff, corrXY, yoff1, xoff1, corrXY1, zest, cmax_all = offsets_all
 

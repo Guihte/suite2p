@@ -848,29 +848,12 @@ def save_iscell(parent):
 
 def save_mat(parent):
     print("saving to mat")
-    matpath = os.path.join(parent.basename, "Fall.mat")
-    if "date_proc" in parent.ops:
-        parent.ops["date_proc"] = []
-    scipy.io.savemat(
-        matpath, {
-            "stat":
-                parent.stat,
-            "settings":
-                parent.ops,
-            "F":
-                parent.Fcell,
-            "Fneu":
-                parent.Fneu,
-            "spks":
-                parent.Spks,
-            "iscell":
-                np.concatenate(
-                    (parent.iscell[:, np.newaxis], parent.probcell[:, np.newaxis]),
-                    axis=1),
-            "redcell":
-                np.concatenate((np.expand_dims(parent.redcell, axis=1),
-                                np.expand_dims(parent.probredcell, axis=1)), axis=1)
-        })
+    iscell = np.concatenate(
+        (parent.iscell[:, np.newaxis], parent.probcell[:, np.newaxis]), axis=1)
+    redcell = np.concatenate(
+        (np.expand_dims(parent.redcell, axis=1), np.expand_dims(parent.probredcell, axis=1)), axis=1)
+    ops = {**parent.ops, "save_path": parent.basename}
+    io.save_mat(ops, parent.stat, parent.Fcell, parent.Fneu, parent.Spks, iscell, redcell)
 
 
 def save_merge(parent):
@@ -892,6 +875,8 @@ def save_merge(parent):
         (parent.iscell[:, np.newaxis], parent.probcell[:, np.newaxis]), axis=1)
     np.save(os.path.join(parent.basename, "iscell.npy"), iscell)
 
+    parent.lcell0.setText("%d" % (parent.iscell.sum()))
+    parent.lcell1.setText("%d" % (parent.iscell.size - parent.iscell.sum()))
     parent.notmerged = np.ones(parent.iscell.size, "bool")
 
 
