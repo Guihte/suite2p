@@ -132,6 +132,41 @@ def _optional_traces_or_zeros(traces, n_rois, n_frames, dtype=np.float32):
     return _match_trace_length(traces, n_frames)
 
 
+def _resolve_manual_roi_binary(settings, basename, key, filename, optional=False):
+    path = settings.get(key)
+    if path and os.path.isfile(path):
+        return path
+
+    local_path = os.path.join(basename, filename)
+    if os.path.isfile(local_path):
+        if path:
+            print(f"Using local copied binary for {key}: {local_path}")
+        settings[key] = local_path
+        return local_path
+
+    if optional:
+        if path:
+            print(
+                f"Skipping optional {key}; binary was not found at {path} "
+                f"or {local_path}."
+            )
+        settings[key] = None
+        return None
+
+    raise FileNotFoundError(
+        f"Manual ROI extraction requires {filename}. Could not find it at "
+        f"{path or '<missing>'} or {local_path}."
+    )
+
+
+def _resolve_manual_roi_binaries(settings, basename):
+    _resolve_manual_roi_binary(settings, basename, "reg_file", "data.bin")
+    if settings.get("reg_file_chan2"):
+        _resolve_manual_roi_binary(
+            settings, basename, "reg_file_chan2", "data_chan2.bin", optional=True
+        )
+
+
 def masks_and_traces(settings, stat_manual, stat_orig):
     """ main extraction function
         inputs: settings and stat
@@ -176,7 +211,8 @@ def masks_and_traces(settings, stat_manual, stat_orig):
     f_reg.close()
 
     # Handle chan2 if present
-    if "reg_file_chan2" in settings and settings["reg_file_chan2"]:
+    if ("reg_file_chan2" in settings and settings["reg_file_chan2"] and
+            os.path.isfile(settings["reg_file_chan2"])):
         f_reg_chan2 = BinaryFile(Ly, Lx, settings["reg_file_chan2"])
         F_chan2, Fneu_chan2 = extract_traces(f_reg_chan2, manual_cell_masks, manual_neuropil_masks, batch_size=batch_size, device=device)
         f_reg_chan2.close()
@@ -600,8 +636,7 @@ class ROIDraw(QMainWindow):
                 pg.ScatterPlotItem([xpix.mean()], [ypix.mean()], pen=self.ROIs[n].color,
                                    symbol="+"))
             self.p0.addItem(self.scatter[-1])
-        if not os.path.isfile(self.parent.ops["reg_file"]):
-            self.parent.ops["reg_file"] = os.path.join(self.parent.basename, "data.bin")
+        _resolve_manual_roi_binaries(self.parent.ops, self.parent.basename)
 
         F, Fneu, F_chan2, Fneu_chan2, spks, settings, stat = masks_and_traces(
             self.parent.ops, stat0, self.parent.stat)
