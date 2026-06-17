@@ -8,13 +8,48 @@ import numpy as np
 import pyqtgraph as pg
 from qtpy import QtGui, QtCore
 from qtpy.QtWidgets import QStyle
-from qtpy.QtWidgets import QWidget, QSlider, QMainWindow, QGridLayout, QStyleOptionSlider, QApplication, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox
+from qtpy.QtWidgets import QWidget, QSlider, QMainWindow, QGridLayout, QStyleOptionSlider, QApplication, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QAbstractSlider
 from matplotlib import cm
 from rastermap.rastermap import Rastermap
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import zscore
 
 from . import masks
+
+
+def _slider_no_ticks():
+    tick_position = getattr(QSlider, "TickPosition", None)
+    if tick_position is not None and hasattr(tick_position, "NoTicks"):
+        return tick_position.NoTicks
+    return QSlider.NoTicks
+
+
+def _qstyle_enum(name, enum_name):
+    if hasattr(QStyle, name):
+        return getattr(QStyle, name)
+    enum = getattr(QStyle, enum_name, None)
+    if enum is not None and hasattr(enum, name):
+        return getattr(enum, name)
+    raise AttributeError(f"QStyle does not expose {name}")
+
+
+def _qabstractslider_enum(name):
+    if hasattr(QAbstractSlider, name):
+        return getattr(QAbstractSlider, name)
+    enum = getattr(QAbstractSlider, "SliderAction", None)
+    if enum is not None and hasattr(enum, name):
+        return getattr(enum, name)
+    raise AttributeError(f"QAbstractSlider does not expose {name}")
+
+
+CC_SLIDER = _qstyle_enum("CC_Slider", "ComplexControl")
+SC_NONE = _qstyle_enum("SC_None", "SubControl")
+SC_SLIDER_GROOVE = _qstyle_enum("SC_SliderGroove", "SubControl")
+SC_SLIDER_HANDLE = _qstyle_enum("SC_SliderHandle", "SubControl")
+SC_SLIDER_TICKMARKS = _qstyle_enum("SC_SliderTickmarks", "SubControl")
+STATE_SUNKEN = _qstyle_enum("State_Sunken", "StateFlag")
+SLIDER_MOVE = _qabstractslider_enum("SliderMove")
+SLIDER_NO_ACTION = _qabstractslider_enum("SliderNoAction")
 
 
 # custom vertical label
@@ -54,8 +89,8 @@ class RangeSlider(QSlider):
         self._low = self.minimum()
         self._high = self.maximum()
 
-        self.pressed_control = QStyle.SC_None
-        self.hover_control = QStyle.SC_None
+        self.pressed_control = SC_NONE
+        self.hover_control = SC_NONE
         self.click_offset = 0
 
         self.setOrientation(QtCore.Qt.Vertical)
@@ -101,19 +136,19 @@ class RangeSlider(QSlider):
             # Only draw the groove for the first slider so it doesn"t get drawn
             # on top of the existing ones every time
             if i == 0:
-                opt.subControls = QStyle.SC_SliderHandle  #QStyle.SC_SliderGroove | QStyle.SC_SliderHandle
+                opt.subControls = SC_SLIDER_HANDLE  # SC_SLIDER_GROOVE | SC_SLIDER_HANDLE
             else:
-                opt.subControls = QStyle.SC_SliderHandle
-            if self.tickPosition() != self.NoTicks:
-                opt.subControls |= QStyle.SC_SliderTickmarks
+                opt.subControls = SC_SLIDER_HANDLE
+            if self.tickPosition() != _slider_no_ticks():
+                opt.subControls |= SC_SLIDER_TICKMARKS
             if self.pressed_control:
                 opt.activeSubControls = self.pressed_control
-                opt.state |= QStyle.State_Sunken
+                opt.state |= STATE_SUNKEN
             else:
                 opt.activeSubControls = self.hover_control
             opt.sliderPosition = value
             opt.sliderValue = value
-            style.drawComplexControl(QStyle.CC_Slider, opt, painter, self)
+            style.drawComplexControl(CC_SLIDER, opt, painter, self)
 
     def mousePressEvent(self, event):
         event.accept()
@@ -125,26 +160,26 @@ class RangeSlider(QSlider):
             self.active_slider = -1
             for i, value in enumerate([self._low, self._high]):
                 opt.sliderPosition = value
-                hit = style.hitTestComplexControl(style.CC_Slider, opt, event.pos(),
+                hit = style.hitTestComplexControl(CC_SLIDER, opt, event.pos(),
                                                   self)
-                if hit == style.SC_SliderHandle:
+                if hit == SC_SLIDER_HANDLE:
                     self.active_slider = i
                     self.pressed_control = hit
-                    self.triggerAction(self.SliderMove)
-                    self.setRepeatAction(self.SliderNoAction)
+                    self.triggerAction(SLIDER_MOVE)
+                    self.setRepeatAction(SLIDER_NO_ACTION)
                     self.setSliderDown(True)
                     break
             if self.active_slider < 0:
-                self.pressed_control = QStyle.SC_SliderHandle
+                self.pressed_control = SC_SLIDER_HANDLE
                 self.click_offset = self.__pixelPosToRangeValue(self.__pick(
                     event.pos()))
-                self.triggerAction(self.SliderMove)
-                self.setRepeatAction(self.SliderNoAction)
+                self.triggerAction(SLIDER_MOVE)
+                self.setRepeatAction(SLIDER_NO_ACTION)
         else:
             event.ignore()
 
     def mouseMoveEvent(self, event):
-        if self.pressed_control != QStyle.SC_SliderHandle:
+        if self.pressed_control != SC_SLIDER_HANDLE:
             event.ignore()
             return
         event.accept()
@@ -188,8 +223,8 @@ class RangeSlider(QSlider):
         self.initStyleOption(opt)
         style = QApplication.style()
 
-        gr = style.subControlRect(style.CC_Slider, opt, style.SC_SliderGroove, self)
-        sr = style.subControlRect(style.CC_Slider, opt, style.SC_SliderHandle, self)
+        gr = style.subControlRect(CC_SLIDER, opt, SC_SLIDER_GROOVE, self)
+        sr = style.subControlRect(CC_SLIDER, opt, SC_SLIDER_HANDLE, self)
 
         if self.orientation() == QtCore.Qt.Horizontal:
             slider_length = sr.width()
