@@ -606,6 +606,16 @@ class ROIDraw(QMainWindow):
                     self.p1.setYRange(self.fmin, self.fmax)
 
     def proc_ROI(self):
+        try:
+            _resolve_manual_roi_binaries(self.parent.ops, self.parent.basename)
+        except FileNotFoundError as exc:
+            QMessageBox.warning(
+                self, "Missing registered binary",
+                f"{exc}\n\nIn the main window, use File > Rebuild registered binary "
+                "from TIFFs for the loaded local plane, then retry Extract ROIs. "
+                "Keep this window open to retain your drawn ROIs.",
+            )
+            return
         stat0 = []
         if self.extracted:
             for t, s in zip(self.scatter, self.tlabel):
@@ -636,8 +646,6 @@ class ROIDraw(QMainWindow):
                 pg.ScatterPlotItem([xpix.mean()], [ypix.mean()], pen=self.ROIs[n].color,
                                    symbol="+"))
             self.p0.addItem(self.scatter[-1])
-        _resolve_manual_roi_binaries(self.parent.ops, self.parent.basename)
-
         F, Fneu, F_chan2, Fneu_chan2, spks, settings, stat = masks_and_traces(
             self.parent.ops, stat0, self.parent.stat)
         self.Fcell = F

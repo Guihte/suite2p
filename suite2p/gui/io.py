@@ -3,15 +3,20 @@ Copyright © 2023 Howard Hughes Medical Institute, Authored by Carsen Stringer a
 """
 import os, time
 from pathlib import Path
+from typing import TYPE_CHECKING
 import numpy as np
 import scipy.io
 from natsort import natsorted
 from scipy.ndimage import gaussian_filter1d
-from qtpy import QtGui
-from qtpy.QtWidgets import QFileDialog, QMessageBox
+from qtpy import QtCore, QtGui
+from qtpy.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
 
 from . import utils, masks, views, graphics, traces, classgui
 from .. import io
+from ..io.recover_binary import recover_binary
+
+if TYPE_CHECKING:
+    from .gui2p import MainWindow
 
 
 MANUAL_ROI_COMBINED_WARNING = (
@@ -365,6 +370,82 @@ def propagate_combined_labels_to_planes(
         QMessageBox.warning(parent, "Propagate combined labels", str(e))
     except Exception as e:
         QMessageBox.critical(parent, "Propagate combined labels", str(e))
+
+
+class _BinaryRecoveryWorker(QtCore.QThread):
+    """Stream the loaded plane's registered TIFFs away from the GUI thread."""
+
+    progress = QtCore.Signal(int)
+
+    def __init__(self, plane_dir: Path, parent: QProgressDialog) -> None:
+        super().__init__(parent)
+        self.plane_dir = plane_dir
+        self.output: Path | None = None
+        self.error: Exception | None = None
+
+    def run(self) -> None:
+        try:
+            self.output = recover_binary(
+                self.plane_dir,
+                progress=lambda written, total: self.progress.emit(100 * written // total),
+                cancel_requested=self.isInterruptionRequested,
+            )
+        except Exception as exc:
+            self.error = exc
+
+
+def recover_registered_binary(parent: "MainWindow") -> None:
+    """Rebuild data.bin for the loaded local plane, preserving the open ROI state.
+
+    Progress and cancellation are shown in a modal dialog while a worker calls
+    the shared TIFF recovery implementation. Success updates only the GUI's
+    in-memory reg_file path; existing result arrays and ops.npy are not saved.
+    """
+    title = "Rebuild registered binary from TIFFs"
+    if not parent.loaded or not is_plane_folder(getattr(parent, "basename", "")):
+        QMessageBox.warning(
+            parent, title,
+            "Load stat.npy from a local plane folder (plane0, plane1, ...) first. "
+            "Binary recovery cannot run on a combined folder.",
+        )
+        return
+
+    dialog = QProgressDialog(
+        "Checking registered TIFFs and rebuilding data.bin...", "Cancel", 0, 100, parent,
+    )
+    dialog.setWindowTitle(title)
+    dialog.setWindowModality(QtCore.Qt.WindowModal)
+    dialog.setAutoClose(False)
+    dialog.setAutoReset(False)
+    worker = _BinaryRecoveryWorker(Path(parent.basename), dialog)
+    worker.progress.connect(dialog.setValue)
+    worker.finished.connect(dialog.accept)
+    dialog.canceled.connect(worker.requestInterruption)
+    dialog.canceled.connect(dialog.reject)
+    worker.start()
+    dialog.exec()
+    # Escape/closing the dialog also cancels. Wait for cooperative cleanup before
+    # destroying the QThread; at most the current TIFF frame read/write completes.
+    if worker.isRunning():
+        worker.requestInterruption()
+    worker.wait()
+    dialog.deleteLater()
+
+    if isinstance(worker.error, InterruptedError):
+        return
+    if worker.error is not None:
+        QMessageBox.warning(
+            parent, title,
+            f"{worker.error}\n\nUse a local plane folder containing ops.npy and reg_tif.",
+        )
+        return
+    if worker.output is not None:
+        parent.ops["reg_file"] = str(worker.output)
+        QMessageBox.information(
+            parent, title,
+            f"Rebuilt {worker.output}\n\nYou can retry Extract ROIs in the open manual "
+            "labelling window. The current ROIs have been kept.",
+        )
 
 
 def export_fig(parent):

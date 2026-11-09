@@ -173,3 +173,31 @@ Also, `BinaryFile` instances can be directly passed to the several wrapper funct
 f_reg = suite2p.io.BinaryFile(Ly=Ly, Lx=Lx, filename='data.bin')
 detect_outputs, stat = suite2p.detection_wrapper(f_reg=f_reg, settings=settings)[:2]
 ```
+
+
+### Recovering a missing registered binary
+
+For older results with a missing `data.bin`, copy the complete plane directory
+to a local drive, including `ops.npy`, `stat.npy`, the `reg_tif` directory,
+and the available ROI and trace files (`iscell.npy`, `F.npy`, `Fneu.npy`,
+`spks.npy`, and related files). Use only a trusted `ops.npy`: loading it
+executes pickle data. In the GUI, load the local `stat.npy` and choose
+**File > Rebuild registered binary from TIFFs**, beside label propagation.
+The progress dialog supports cancellation. On success, the open GUI uses the
+reconstructed binary without reloading the ROIs; retry **Extract ROIs** in
+any open manual labelling window.
+
+The same recovery is also available from the command line:
+
+```text
+python -m suite2p.io.recover_binary <local-plane-directory>
+```
+
+The command validates the full-size signed int16 registered TIFF pages against
+`ops.npy` and, when present, `F.npy`, then creates the functional-channel
+`data.bin` in the local plane directory without replacing an existing binary.
+It accepts current `fileNNNNN.tif` batches and legacy `fileNNNNN_chan0.tif`
+frame-offset batches. Reconstructed values match the saved registered TIFFs;
+historical export rounding means they may differ from the deleted binary.
+Network paths and links are refused. For command-line recovery, open the local
+`stat.npy` in the Suite2p GUI and retry manual ROI extraction.

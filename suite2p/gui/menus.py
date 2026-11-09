@@ -45,6 +45,10 @@ def mainmenu(parent):
         lambda: propagate_combined_labels(parent))
     parent.addAction(propagateCombinedLabels)
 
+    recoverBinary = QAction("Rebuild registered binary from TIFFs", parent)
+    recoverBinary.triggered.connect(lambda: io.recover_registered_binary(parent))
+    parent.addAction(recoverBinary)
+
     # load a behavioral trace
     parent.loadBeh = QAction("Load behavior or stim trace (1D only)", parent)
     parent.loadBeh.triggered.connect(lambda: io.load_behavior(parent))
@@ -85,6 +89,7 @@ def mainmenu(parent):
     file_menu.addAction(loadFolder)
     file_menu.addAction(regenerateCombined)
     file_menu.addAction(propagateCombinedLabels)
+    file_menu.addAction(recoverBinary)
     file_menu.addAction(parent.loadBeh)
     file_menu.addAction(parent.saveNWB)
     file_menu.addAction(parent.saveMat)
