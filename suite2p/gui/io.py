@@ -9,11 +9,11 @@ import scipy.io
 from natsort import natsorted
 from scipy.ndimage import gaussian_filter1d
 from qtpy import QtCore, QtGui
-from qtpy.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
+from qtpy.QtWidgets import QFileDialog, QMessageBox, QDialog, QDialogButtonBox, QLabel, QProgressBar, QVBoxLayout, QInputDialog
 
 from . import utils, masks, views, graphics, traces, classgui
 from .. import io
-from ..io.recover_binary import recover_binary
+from ..io.recover_binary import TiffExportSelectionRequired, TiffSet, recover_binary
 
 if TYPE_CHECKING:
     from .gui2p import MainWindow
@@ -377,16 +377,17 @@ class _BinaryRecoveryWorker(QtCore.QThread):
 
     progress = QtCore.Signal(int)
 
-    def __init__(self, plane_dir: Path, parent: QProgressDialog) -> None:
+    def __init__(self, plane_dir: Path, parent: QDialog, tiff_set: TiffSet | None = None) -> None:
         super().__init__(parent)
         self.plane_dir = plane_dir
+        self.tiff_set = tiff_set
         self.output: Path | None = None
         self.error: Exception | None = None
 
     def run(self) -> None:
         try:
             self.output = recover_binary(
-                self.plane_dir,
+                self.plane_dir, tiff_set=self.tiff_set,
                 progress=lambda written, total: self.progress.emit(100 * written // total),
                 cancel_requested=self.isInterruptionRequested,
             )
@@ -394,8 +395,45 @@ class _BinaryRecoveryWorker(QtCore.QThread):
             self.error = exc
 
 
+class _BinaryRecoveryDialog(QDialog):
+    """Keep cancellation responsive until outstanding filesystem I/O finishes."""
+
+    def __init__(self, plane_dir: Path, parent: "MainWindow", tiff_set: TiffSet | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Rebuild registered binary from TIFFs")
+        self.cancel_requested = False
+        self.label = QLabel("Checking registered TIFFs and rebuilding data.bin...", self)
+        progress = QProgressBar(self)
+        progress.setRange(0, 100)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel, self)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.label)
+        layout.addWidget(progress)
+        layout.addWidget(self.buttons)
+        self.worker = _BinaryRecoveryWorker(plane_dir, self, tiff_set)
+        self.worker.progress.connect(progress.setValue)
+        self.worker.finished.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+    def reject(self) -> None:
+        self.cancel_requested = True
+        if self.worker.isRunning():
+            self.worker.requestInterruption()
+            self.label.setText("Cancelling... Waiting for the current file operation to finish.")
+            self.buttons.setEnabled(False)
+        else:
+            super().reject()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if self.worker.isRunning():
+            self.reject()
+            event.ignore()
+        else:
+            super().closeEvent(event)
+
+
 def recover_registered_binary(parent: "MainWindow") -> None:
-    """Rebuild data.bin for the loaded local plane, preserving the open ROI state.
+    """Rebuild data.bin for the loaded plane, preserving the open ROI state.
 
     Progress and cancellation are shown in a modal dialog while a worker calls
     the shared TIFF recovery implementation. Success updates only the GUI's
@@ -405,41 +443,50 @@ def recover_registered_binary(parent: "MainWindow") -> None:
     if not parent.loaded or not is_plane_folder(getattr(parent, "basename", "")):
         QMessageBox.warning(
             parent, title,
-            "Load stat.npy from a local plane folder (plane0, plane1, ...) first. "
+            "Load stat.npy from a plane folder (plane0, plane1, ...) first. "
             "Binary recovery cannot run on a combined folder.",
         )
         return
 
-    dialog = QProgressDialog(
-        "Checking registered TIFFs and rebuilding data.bin...", "Cancel", 0, 100, parent,
-    )
-    dialog.setWindowTitle(title)
-    dialog.setWindowModality(QtCore.Qt.WindowModal)
-    dialog.setAutoClose(False)
-    dialog.setAutoReset(False)
-    worker = _BinaryRecoveryWorker(Path(parent.basename), dialog)
-    worker.progress.connect(dialog.setValue)
-    worker.finished.connect(dialog.accept)
-    dialog.canceled.connect(worker.requestInterruption)
-    dialog.canceled.connect(dialog.reject)
-    worker.start()
-    dialog.exec()
-    # Escape/closing the dialog also cancels. Wait for cooperative cleanup before
-    # destroying the QThread; at most the current TIFF frame read/write completes.
-    if worker.isRunning():
-        worker.requestInterruption()
-    worker.wait()
-    dialog.deleteLater()
+    loaded_basename, loaded_ops = parent.basename, parent.ops
+    tiff_set: TiffSet | None = None
+    while True:
+        dialog = _BinaryRecoveryDialog(Path(loaded_basename), parent, tiff_set)
+        worker = dialog.worker
+        worker.start()
+        dialog.exec()
+        worker.wait()
+        dialog.deleteLater()
+        if not isinstance(worker.error, TiffExportSelectionRequired):
+            break
+        if dialog.cancel_requested:
+            return
+        choices = {f"Files like {example}": kind for kind, example in worker.error.exports.items()}
+        choice, accepted = QInputDialog.getItem(
+            parent, title,
+            "Multiple TIFF exports are present. Choose the export from the same run "
+            "as the loaded ROI results:", list(choices), 0, False,
+        )
+        if not accepted:
+            return
+        tiff_set = choices[choice]
 
     if isinstance(worker.error, InterruptedError):
         return
     if worker.error is not None:
         QMessageBox.warning(
             parent, title,
-            f"{worker.error}\n\nUse a local plane folder containing ops.npy and reg_tif.",
+            f"{worker.error}\n\nThe plane folder must contain ops.npy and reg_tif and allow read/write access.",
         )
         return
     if worker.output is not None:
+        if parent.basename != loaded_basename or parent.ops is not loaded_ops:
+            QMessageBox.information(
+                parent, title,
+                f"Rebuilt {worker.output}\n\nThe loaded result changed during recovery. "
+                "Reopen the recovered plane to use this binary.",
+            )
+            return
         parent.ops["reg_file"] = str(worker.output)
         QMessageBox.information(
             parent, title,

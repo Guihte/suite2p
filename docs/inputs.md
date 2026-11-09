@@ -177,27 +177,35 @@ detect_outputs, stat = suite2p.detection_wrapper(f_reg=f_reg, settings=settings)
 
 ### Recovering a missing registered binary
 
-For older results with a missing `data.bin`, copy the complete plane directory
-to a local drive, including `ops.npy`, `stat.npy`, the `reg_tif` directory,
-and the available ROI and trace files (`iscell.npy`, `F.npy`, `Fneu.npy`,
-`spks.npy`, and related files). Use only a trusted `ops.npy`: loading it
-executes pickle data. In the GUI, load the local `stat.npy` and choose
+For older results with a missing `data.bin`, open the plane's `stat.npy` from
+its existing folder, on a local drive, UNC share, or mapped network drive.
+The folder must contain `ops.npy`, the complete `reg_tif` directory and the
+usual ROI/trace files, and your account must have read/write access there.
+Use only a trusted `ops.npy`: loading it executes pickle data. Choose
 **File > Rebuild registered binary from TIFFs**, beside label propagation.
-The progress dialog supports cancellation. On success, the open GUI uses the
+The progress dialog supports cancellation; outstanding network I/O may need to
+finish or time out before cleanup completes. On success, the open GUI uses the
 reconstructed binary without reloading the ROIs; retry **Extract ROIs** in
 any open manual labelling window.
 
 The same recovery is also available from the command line:
 
 ```text
-python -m suite2p.io.recover_binary <local-plane-directory>
+python -m suite2p.io.recover_binary <plane-directory>
 ```
 
 The command validates the full-size signed int16 registered TIFF pages against
 `ops.npy` and, when present, `F.npy`, then creates the functional-channel
-`data.bin` in the local plane directory without replacing an existing binary.
-It accepts current `fileNNNNN.tif` batches and legacy `fileNNNNN_chan0.tif`
-frame-offset batches. Reconstructed values match the saved registered TIFFs;
+`data.bin` in that plane directory without replacing an existing binary.
+It accepts `file 0000.tif` and `file00000.tif` batch-number exports, and legacy
+`file00000_chan0.tif` frame-offset exports. If naming styles coexist (for example
+after a rerun), the GUI asks which export belongs to the loaded ROI results.
+The sets are never concatenated or chosen from timestamps/version fields.
+From the CLI, select `--tiff-set spaced`, `--tiff-set numbered`, or
+`--tiff-set legacy` respectively. Reconstructed values match the saved registered TIFFs;
 historical export rounding means they may differ from the deleted binary.
-Network paths and links are refused. For command-line recovery, open the local
-`stat.npy` in the Suite2p GUI and retry manual ROI extraction.
+The binary becomes available only after writing completes. A failed or cancelled
+recovery removes its temporary file when the folder is accessible; if a network
+failure also prevents cleanup, the error identifies the temporary file to remove
+after reconnecting. For command-line recovery, open the plane's `stat.npy` in the
+Suite2p GUI and retry manual ROI extraction.

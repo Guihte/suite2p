@@ -612,7 +612,7 @@ class ROIDraw(QMainWindow):
             QMessageBox.warning(
                 self, "Missing registered binary",
                 f"{exc}\n\nIn the main window, use File > Rebuild registered binary "
-                "from TIFFs for the loaded local plane, then retry Extract ROIs. "
+                "from TIFFs for the loaded plane, then retry Extract ROIs. "
                 "Keep this window open to retain your drawn ROIs.",
             )
             return

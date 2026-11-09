@@ -1,5 +1,8 @@
 """Recovery of Suite2p binaries from local registered TIFF batches."""
 
+import builtins
+import io as stdlib_io
+import os
 from pathlib import Path
 
 import numpy as np
@@ -81,19 +84,51 @@ def test_failure_removes_temporary_output(tmp_path: Path, monkeypatch: pytest.Mo
     if failure == "decode":
         monkeypatch.setattr(tifffile.TiffPage, "asarray", fail)
     else:
-        monkeypatch.setattr(suite2p_binary.os, "link", fail)
+        monkeypatch.setattr(suite2p_binary.os, "rename" if os.name == "nt" else "link", fail)
     with pytest.raises(OSError, match="injected"):
         suite2p_binary.recover_binary(plane)
     assert not (plane / "data.bin").exists()
     assert not list(plane.glob(".data.bin.*"))
 
 
-def test_unc_refused_before_filesystem_access(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail(*args: object, **kwargs: object) -> None:
-        raise AssertionError("unexpected filesystem access")
-    monkeypatch.setattr(Path, "lstat", fail)
-    with pytest.raises(ValueError, match="UNC"):
-        suite2p_binary.recover_binary(r"\\\\server\\share\\plane0")
+def forbid_network_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make accidental real network filesystem calls fail before performing I/O."""
+    def guard(operation):
+        def checked(*args, **kwargs):
+            for value in (*args, *kwargs.values()):
+                if isinstance(value, (str, Path)):
+                    spelling = str(value).replace("\\", "/").lower()
+                    if spelling.startswith(("//", "z:")):
+                        raise AssertionError(f"Unexpected real network access: {value}")
+            return operation(*args, **kwargs)
+        return checked
+
+    for module, name in (
+        (builtins, "open"), (stdlib_io, "open"), (os, "open"), (os, "stat"),
+        (os, "lstat"), (os, "scandir"), (os, "rename"), (os, "link"), (os, "unlink"),
+    ):
+        monkeypatch.setattr(module, name, guard(getattr(module, name)))
+
+
+@pytest.mark.parametrize("alias", [r"\\nas.invalid\share\plane0", "//nas.invalid/share/plane0", "Z:/suite2p/plane0"])
+def test_network_spelling_with_local_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias: str,
+) -> None:
+    plane, frames = make_plane(tmp_path, 3)
+    absolute = Path.absolute
+    spelling = str(Path(alias))
+
+    def mapped_absolute(path: Path) -> Path:
+        if str(path) == spelling:
+            return plane
+        return absolute(path)
+
+    # Redirect the alias before any filesystem call; never contact a real NAS.
+    monkeypatch.setattr(Path, "absolute", mapped_absolute)
+    forbid_network_io(monkeypatch)
+    result = suite2p_binary.recover_binary(alias)
+    np.testing.assert_array_equal(np.fromfile(result, dtype="<i2").reshape(-1, 2, 3), np.stack(frames))
+
 
 def test_write_failure_removes_temporary_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     plane, _ = make_plane(tmp_path)
@@ -120,17 +155,17 @@ def test_write_failure_removes_temporary_output(tmp_path: Path, monkeypatch: pyt
     assert not list(plane.glob(".data.bin.*"))
 
 
-def test_symlinked_f_is_refused_before_loading(tmp_path: Path) -> None:
+def test_symlinked_f_is_supported(tmp_path: Path) -> None:
     plane, _ = make_plane(tmp_path)
     traces = plane / "F.npy"
-    traces.unlink()
+    original = plane / "F_original.npy"
+    traces.rename(original)
     try:
-        traces.symlink_to(tmp_path / "missing")
+        traces.symlink_to(original)
     except OSError:
         pytest.skip("Creating symbolic links is unavailable")
-    with pytest.raises(ValueError, match="links and reparse points"):
-        suite2p_binary.recover_binary(plane)
-    assert not (plane / "data.bin").exists()
+    assert suite2p_binary.recover_binary(plane) == plane / "data.bin"
+
 
 def test_legacy_offsets_follow_number_of_pages(tmp_path: Path) -> None:
     plane, frames = make_plane(tmp_path, 5)
@@ -159,7 +194,7 @@ def test_legacy_missing_frames_are_rejected(tmp_path: Path) -> None:
 def test_duplicate_or_mixed_names_are_rejected(tmp_path: Path, other: str) -> None:
     plane, frames = make_plane(tmp_path)
     tifffile.imwrite(plane / "reg_tif" / other, frames[0])
-    with pytest.raises(ValueError, match="Duplicate|Mixed"):
+    with pytest.raises(ValueError, match="Duplicate|Multiple"):
         suite2p_binary.recover_binary(plane)
     assert not (plane / "data.bin").exists()
 
@@ -182,3 +217,123 @@ def test_cancellation_never_publishes_partial_binary(tmp_path: Path, cancel_at: 
     assert updates[0] == (0, 3)
     assert not (plane / "data.bin").exists()
     assert not list(plane.glob(".data.bin.*"))
+
+
+def test_concurrent_destination_is_not_overwritten(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plane, _ = make_plane(tmp_path)
+    operation = "rename" if os.name == "nt" else "link"
+    publish = getattr(os, operation)
+
+    def create_before_publish(source, destination):
+        Path(destination).write_bytes(b"concurrent output")
+        return publish(source, destination)
+
+    monkeypatch.setattr(suite2p_binary.os, operation, create_before_publish)
+    with pytest.raises(FileExistsError):
+        suite2p_binary.recover_binary(plane)
+    assert (plane / "data.bin").read_bytes() == b"concurrent output"
+    assert not list(plane.glob(".data.bin.*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows no-overwrite rename publication")
+def test_windows_publish_needs_no_hardlink_or_cleanup_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plane, _ = make_plane(tmp_path)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Successful Windows publication must not link or unlink")
+
+    monkeypatch.setattr(suite2p_binary.os, "link", unexpected)
+    monkeypatch.setattr(Path, "unlink", unexpected)
+    assert suite2p_binary.recover_binary(plane) == plane / "data.bin"
+
+
+@pytest.mark.parametrize("failure", ["read", "cancel"])
+def test_cleanup_failure_reports_original_error_and_leftover_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    plane, _ = make_plane(tmp_path)
+    cancel = False
+    unlink = Path.unlink
+
+    def cleanup(path: Path, *args, **kwargs):
+        if path.name.startswith(".data.bin."):
+            raise OSError("share disconnected during cleanup")
+        return unlink(path, *args, **kwargs)
+
+    def progress(written: int, total: int) -> None:
+        nonlocal cancel
+        cancel = failure == "cancel"
+
+    def failed_read(*args, **kwargs):
+        raise OSError("share disconnected during read")
+
+    monkeypatch.setattr(Path, "unlink", cleanup)
+    if failure == "read":
+        monkeypatch.setattr(tifffile.TiffPage, "asarray", failed_read)
+    with pytest.raises(OSError, match="Could not remove temporary file") as caught:
+        suite2p_binary.recover_binary(plane, progress=progress, cancel_requested=lambda: cancel)
+    assert caught.value.__cause__ is not None
+    assert "cancelled" in str(caught.value) if failure == "cancel" else "disconnected during read" in str(caught.value)
+    assert "disconnected during cleanup" in str(caught.value)
+    leftovers = list(plane.glob(".data.bin.*"))
+    assert len(leftovers) == 1 and str(leftovers[0]) in str(caught.value)
+    assert not (plane / "data.bin").exists()
+
+
+def make_mixed_exports(root: Path) -> tuple[Path, np.ndarray, np.ndarray]:
+    plane, frames = make_plane(root, 5)
+    current = np.stack(frames)
+    legacy = current.copy()
+    legacy[:, 0, 0] = -123
+    reg = plane / "reg_tif"
+    for path in reg.glob("*.tif"):
+        path.unlink()
+    tifffile.imwrite(reg / "file 0000.tif", current[:3], photometric="minisblack")
+    tifffile.imwrite(reg / "file 0001.tif", current[3:], photometric="minisblack")
+    tifffile.imwrite(reg / "file00000_chan0.tif", legacy[:3], photometric="minisblack")
+    tifffile.imwrite(reg / "file00003_chan0.tif", legacy[3:], photometric="minisblack")
+    np.save(plane / "ops.npy", {"Ly": 2, "Lx": 3, "nframes": 5, "nchannels": 2, "functional_chan": 2})
+    return plane, current, legacy
+
+
+def test_actual_suite2p_space_format_is_supported(tmp_path: Path) -> None:
+    plane, frames = make_plane(tmp_path, 12)
+    for index in range(12):
+        (plane / "reg_tif" / f"file{index:05d}.tif").rename(plane / "reg_tif" / f"file{index: 05d}.tif")
+    result = suite2p_binary.recover_binary(plane)
+    np.testing.assert_array_equal(np.fromfile(result, dtype="<i2").reshape(-1, 2, 3), np.stack(frames))
+
+
+def test_complete_exports_require_explicit_selection(tmp_path: Path) -> None:
+    plane, _, _ = make_mixed_exports(tmp_path)
+    with pytest.raises(suite2p_binary.TiffExportSelectionRequired) as caught:
+        suite2p_binary.recover_binary(plane)
+    assert caught.value.exports == {"spaced": "file 0000.tif", "legacy": "file00000_chan0.tif"}
+    assert not (plane / "data.bin").exists()
+
+
+@pytest.mark.parametrize("tiff_set", ["spaced", "legacy"])
+def test_explicit_export_never_mixes_movies(tmp_path: Path, tiff_set: suite2p_binary.TiffSet) -> None:
+    plane, current, legacy = make_mixed_exports(tmp_path)
+    expected = current if tiff_set == "spaced" else legacy
+    result = suite2p_binary.recover_binary(plane, tiff_set=tiff_set)
+    actual = np.fromfile(result, dtype="<i2").reshape(-1, 2, 3)
+    assert actual.shape[0] == 5
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_cancel_during_discovery_does_not_request_export_selection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plane, _, _ = make_mixed_exports(tmp_path)
+    cancelled = False
+    iterdir = Path.iterdir
+
+    def listing(path: Path):
+        nonlocal cancelled
+        for entry in iterdir(path):
+            cancelled = True
+            yield entry
+
+    monkeypatch.setattr(Path, "iterdir", listing)
+    with pytest.raises(InterruptedError, match="cancelled"):
+        suite2p_binary.recover_binary(plane, cancel_requested=lambda: cancelled)
+    assert not (plane / "data.bin").exists()
