@@ -72,9 +72,11 @@ def _validate_plane_outputs_for_combined(suite2p_root):
         plane_name = plane_folder.name
         for filename in ("stat.npy", "db.npy", "settings.npy"):
             if not (plane_folder / filename).is_file():
+                if filename in ("db.npy", "settings.npy") and (plane_folder / "ops.npy").is_file():
+                    continue  # The shared combined builder recovers missing metadata.
                 raise ValueError(
                     f"Cannot regenerate combined because {plane_name} is missing "
-                    f"required file: {filename}"
+                    f"required file: {filename} (saved ops.npy can recover db/settings metadata)"
                 )
         stat = np.load(plane_folder / "stat.npy", allow_pickle=True)
         if len(stat) == 0:

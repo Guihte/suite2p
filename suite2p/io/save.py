@@ -227,7 +227,8 @@ def combined(save_folder, save=True):
     ----------
     save_folder : str
         Path to the suite2p output folder containing plane subdirectories
-        (e.g. "plane0", "plane1", ...).
+        (e.g. "plane0", "plane1", ...). Missing per-plane db.npy/settings.npy
+        are recovered from saved ops.npy without reprocessing movies or ROIs.
     save : bool, optional (default True)
         If True, save combined results (F.npy, Fneu.npy, spks.npy, stat.npy,
         db.npy, settings.npy, and optionally Fall.mat) to a "combined"
@@ -262,31 +263,27 @@ def combined(save_folder, save=True):
     plane_folders = natsorted([
         f.path for f in os.scandir(save_folder) if f.is_dir() and f.name[:5] == "plane"
     ])
+    from .recover_metadata import recover_plane_metadata
+
     top_db_path = os.path.join(save_folder, "db.npy")
     if os.path.exists(top_db_path):
         top_db = np.load(top_db_path, allow_pickle=True).item()
         ignore_flyback = set(top_db.get("ignore_flyback") or [])
         if ignore_flyback:
             plane_folders = [f for i, f in enumerate(plane_folders) if i not in ignore_flyback]
-    dbs = [
-        np.load(os.path.join(f, "db.npy"), allow_pickle=True).item()
-        for f in plane_folders
-    ]
+    if not plane_folders:
+        raise ValueError("No processed planeX folders in folder.")
+    dbs = []
+    for folder in plane_folders:
+        for recovered in recover_plane_metadata(folder):
+            logger.info("Recovered missing plane metadata: %s", recovered)
+        db = np.load(os.path.join(folder, "db.npy"), allow_pickle=True).item()
+        for filename in ("reg_outputs.npy", "detect_outputs.npy"):
+            path = os.path.join(folder, filename)
+            if os.path.exists(path):
+                db = {**db, **np.load(path, allow_pickle=True).item()}
+        dbs.append(db)
     settings = np.load(os.path.join(plane_folders[0], "settings.npy"), allow_pickle=True).item()
-    if os.path.exists(os.path.join(plane_folders[0], "reg_outputs.npy")):
-        dops =  [
-        np.load(os.path.join(f, "reg_outputs.npy"), allow_pickle=True).item()
-        for f in plane_folders
-        ]
-        dbs = [{**db, **dop} for db, dop in zip(dbs, dops)]
-    
-    if os.path.exists(os.path.join(plane_folders[0], "detect_outputs.npy")):
-        dops =  [
-        np.load(os.path.join(f, "detect_outputs.npy"), allow_pickle=True).item()
-        for f in plane_folders
-        ]
-        dbs = [{**db, **dop} for db, dop in zip(dbs, dops)]
-    
 
     dy, dx = compute_dydx(dbs)
     Ly = np.array([db["Ly"] for db in dbs])

@@ -209,3 +209,29 @@ recovery removes its temporary file when the folder is accessible; if a network
 failure also prevents cleanup, the error identifies the temporary file to remove
 after reconnecting. For command-line recovery, open the plane's `stat.npy` in the
 Suite2p GUI and retry manual ROI extraction.
+
+
+### Recovering metadata for combined regeneration
+
+For older per-plane results containing `ops.npy` but missing `db.npy` or
+`settings.npy`, choose **File > Regenerate combined folder**. Missing metadata
+is recreated in each plane folder before the combined results are rebuilt and
+reloaded. Existing metadata, `ops.npy`, ROI arrays, traces and plane labels are
+preserved. Neither `data.bin` nor registered TIFFs are required, and no
+registration, ROI detection or trace extraction is rerun.
+
+Recovery requires trusted `ops.npy` files from the same run as the retained
+plane outputs, with saved frame dimensions, frame counts, channel counts, timing,
+mean images and detection maps. Database values
+come from those files. Settings use the fork's existing legacy converter:
+recorded values are retained and newer settings use current defaults. This
+supports combining saved results; it does not reproduce the original software
+environment or missing scientific metadata. Mixed older and newer plane formats
+are supported. Local, UNC and mapped paths use the same recovery, with read/write
+access required for missing metadata and the combined output.
+
+To restore only one plane's missing metadata without rebuilding combined:
+
+```text
+python -m suite2p.io.recover_metadata <plane-directory>
+```
